@@ -1,64 +1,31 @@
+from app.llm.gemini_client import GeminiClient
+from app.models.enums import Intent
 from app.retrieval.retriever import Retriever
 
 
 class AssessmentAgent:
     """
-    Main conversational agent for recommending SHL assessments.
+    Main orchestration layer for the SHL Assessment Agent.
     """
 
     def __init__(self):
         self.retriever = Retriever()
+        self.gemini = GeminiClient()
 
-    def extract_context(self, messages):
+    def can_recommend(self, context):
         """
-        Combine all user messages into a single context string.
+        Decide whether enough information is available
+        to perform semantic search.
         """
 
-        user_text = " ".join(
-            message["content"]
-            for message in messages
-            if message["role"] == "user"
+        return (
+            context.role is not None
+            or len(context.skills) > 0
         )
-
-        return user_text.lower()
-
-    def needs_clarification(self, context: str) -> bool:
-        """
-        Decide whether enough information has been provided
-        to recommend assessments.
-        """
-
-        roles = [
-            "developer",
-            "engineer",
-            "manager",
-            "analyst",
-            "sales",
-            "consultant",
-            "intern",
-            "graduate",
-        ]
-
-        skills = [
-            "java",
-            "python",
-            "c++",
-            "javascript",
-            "react",
-            "sql",
-            "aws",
-            "leadership",
-            "communication",
-        ]
-
-        has_role = any(role in context for role in roles)
-        has_skill = any(skill in context for skill in skills)
-
-        return not (has_role or has_skill)
 
     def chat(self, messages):
         """
-        Process the conversation and return the next response.
+        Process a conversation and return recommendations.
         """
 
         if not messages:
@@ -68,38 +35,135 @@ class AssessmentAgent:
                 "end_of_conversation": False,
             }
 
-        # Build conversation context
-        context = self.extract_context(messages)
+        # -------------------------------------------------
+        # Step 1 : Extract structured context using Gemini
+        # -------------------------------------------------
+        context = self.gemini.extract_context(messages)
 
-        # Ask for clarification if required
-        if self.needs_clarification(context):
+        # -------------------------------------------------
+        # Step 2 : Ask clarification only if absolutely needed
+        # -------------------------------------------------
+        if not self.can_recommend(context):
+
+            field = (
+                context.missing_fields[0]
+                if context.missing_fields
+                else "role"
+            )
+
+            clarification_questions = {
+                "role": "What role are you hiring for?",
+                "experience": "What experience level are you hiring for?",
+                "assessment_type": (
+                    "Are you looking for a technical, personality, "
+                    "cognitive, or behavioral assessment?"
+                ),
+                "skills": "Which key skills should be assessed?",
+            }
+
             return {
-                "reply": (
-                    "Could you tell me more about the role you're hiring for? "
-                    "For example, the job title, required skills, or experience level."
+                "reply": clarification_questions.get(
+                    field,
+                    "Could you provide a little more information?"
                 ),
                 "recommendations": [],
                 "end_of_conversation": False,
             }
 
-        # Retrieve assessments
-        results = self.retriever.search(
-            context,
-            top_k=5,
-        )
+        # -------------------------------------------------
+        # Step 3 : Handle recommendation requests
+        # -------------------------------------------------
+        if context.intent == Intent.RECOMMEND:
 
-        recommendations = []
+            query_parts = []
 
-        for result in results:
-            recommendations.append(
-                {
-                    "name": result["name"],
-                    "url": result["url"],
-                }
+            if context.role:
+                query_parts.append(context.role)
+
+            query_parts.extend(context.skills)
+
+            if context.experience:
+                query_parts.append(context.experience)
+
+            if context.job_level:
+                query_parts.append(context.job_level.value)
+
+            query_parts.extend(
+                assessment.value
+                for assessment in context.assessment_types
             )
 
+            query_parts.extend(context.must_have)
+
+            search_query = " ".join(query_parts)
+
+            results = self.retriever.search(
+                search_query,
+                top_k=5,
+            )
+
+            recommendations = []
+
+            for result in results:
+                recommendations.append(
+                    {
+                        "name": result["name"],
+                        "url": result["url"],
+                        "score": round(result["score"], 3),
+                        "categories": result["categories"],
+                        "adaptive": result["adaptive"],
+                        "duration": result["duration"]
+                        if result["duration"]
+                        else "Not specified",
+                        "job_levels": result["job_levels"],
+                    }
+                )
+
+            return {
+                "reply": "I found these SHL assessments based on your hiring requirements.",
+                "recommendations": recommendations,
+                "end_of_conversation": False,
+            }
+
+        # -------------------------------------------------
+        # Future intents
+        # -------------------------------------------------
+        if context.intent == Intent.COMPARE:
+            return {
+                "reply": "Assessment comparison will be available soon.",
+                "recommendations": [],
+                "end_of_conversation": False,
+            }
+
+        if context.intent == Intent.REFINE:
+            return {
+                "reply": "Recommendation refinement will be available soon.",
+                "recommendations": [],
+                "end_of_conversation": False,
+            }
+
+        if context.intent == Intent.EXPLAIN:
+            return {
+                "reply": "Recommendation explanation will be available soon.",
+                "recommendations": [],
+                "end_of_conversation": False,
+            }
+
+        if context.intent == Intent.GREETING:
+            return {
+                "reply": (
+                    "Hello! I can help you find the most suitable SHL "
+                    "assessment for your hiring needs."
+                ),
+                "recommendations": [],
+                "end_of_conversation": False,
+            }
+
         return {
-            "reply": "Here are some SHL assessments that match your requirements.",
-            "recommendations": recommendations,
+            "reply": (
+                "I'm not sure how to help with that yet. "
+                "Try describing the role you're hiring for."
+            ),
+            "recommendations": [],
             "end_of_conversation": False,
         }
